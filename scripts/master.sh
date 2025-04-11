@@ -1,43 +1,44 @@
 #!/bin/bash
 #
-# Initialisation du premier master (master1)
+# Setup for Control Plane (Master) servers
 
 set -euxo pipefail
 
-PUBLIC_IP_ACCESS="false"  # true si tu exposes l'API sur l'IP publique
+# If you need public access to API server using the servers Public IP adress, change PUBLIC_IP_ACCESS to true.
+CONTROL_PLANE_ENDPOINT="192.168.1.100:6443"  # IP/nom DNS du load balancer (obligatoire pour HA)
+PUBLIC_IP_ACCESS="false"
 NODENAME=$(hostname -s)
 POD_CIDR="192.168.0.0/16"
-CONTROL_PLANE_ENDPOINT="192.168.112.250:6443"  # IP/nom DNS du load balancer (obligatoire pour HA)
 
-# Désactiver le swap
-sudo swapoff -a
+# Pull required images
 
-# Récupération de l'adresse IP
-if [[ "$PUBLIC_IP_ACCESS" == "true" ]]; then
-    MASTER_IP=$(curl -s ifconfig.me)
-else
-    MASTER_IP=$(ip -o -4 addr list | grep -v '127.0.0.1' | awk '{print $4}' | cut -d/ -f1 | head -n1)
-fi
-
-# Pull des images nécessaires
 sudo kubeadm config images pull
 
-# Initialisation du master
-sudo kubeadm init \
-    --control-plane-endpoint="$CONTROL_PLANE_ENDPOINT" \
-    --apiserver-advertise-address="$MASTER_IP" \
-    --apiserver-cert-extra-sans="$MASTER_IP" \
-    --upload-certs \
-    --pod-network-cidr="$POD_CIDR" \
-    --node-name "$NODENAME" \
-    --ignore-preflight-errors Swap
+# Initialize kubeadm based on PUBLIC_IP_ACCESS
 
-# Configuration de kubectl
-mkdir -p "$HOME/.kube"
-sudo cp -i /etc/kubernetes/admin.conf "$HOME/.kube/config"
-sudo chown "$(id -u)":"$(id -g)" "$HOME/.kube/config"
+if [[ "$PUBLIC_IP_ACCESS" == "false" ]]; then
+    
+    MASTER_PRIVATE_IP=$(ip addr show eth1 | awk '/inet / {print $2}' | cut -d/ -f1)
+    sudo kubeadm init --control-plane-endpoint="$CONTROL_PLANE_ENDPOINT" --apiserver-advertise-address="$MASTER_PRIVATE_IP" --apiserver-cert-extra-sans="$MASTER_PRIVATE_IP" --pod-network-cidr="$POD_CIDR" --node-name "$NODENAME" --ignore-preflight-errors Swap
 
-# Installer Calico
+elif [[ "$PUBLIC_IP_ACCESS" == "false" ]]; then
+
+    MASTER_PUBLIC_IP=$(curl ifconfig.me && echo "")
+    sudo kubeadm init --control-plane-endpoint="$MASTER_PUBLIC_IP" --apiserver-cert-extra-sans="$MASTER_PUBLIC_IP" --pod-network-cidr="$POD_CIDR" --node-name "$NODENAME" --ignore-preflight-errors Swap
+
+else
+    echo "Error: MASTER_PUBLIC_IP has an invalid value: $PUBLIC_IP_ACCESS"
+    exit 1
+fi
+
+# Configure kubeconfig
+
+mkdir -p "$HOME"/.kube
+sudo cp -i /etc/kubernetes/admin.conf "$HOME"/.kube/config
+sudo chown "$(id -u)":"$(id -g)" "$HOME"/.kube/config
+
+# Install Claico Network Plugin Network 
+
 kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
 
 # Afficher les commandes kubeadm join (pour master2)
