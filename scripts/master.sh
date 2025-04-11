@@ -1,58 +1,47 @@
-
 #!/bin/bash
 #
-# Setup for Control Plane (Master 1) server in HA mode
+# Initialisation du premier master (master1)
 
 set -euxo pipefail
 
-# Configuration
-PUBLIC_IP_ACCESS="false"
-CONTROL_PLANE_ENDPOINT="192.168.112.250"  # VIP via HAProxy
-POD_CIDR="192.168.112.0/16"
+PUBLIC_IP_ACCESS="false"  # true si tu exposes l'API sur l'IP publique
 NODENAME=$(hostname -s)
+POD_CIDR="192.168.0.0/16"
+CONTROL_PLANE_ENDPOINT="192.168.112.250:6443"  # IP/nom DNS du load balancer (obligatoire pour HA)
 
-# Pull required images
-sudo kubeadm config images pull
+# Désactiver le swap
+sudo swapoff -a
 
-# Initialize kubeadm
-if [[ "$PUBLIC_IP_ACCESS" == "false" ]]; then
-    
-    MASTER_IP=$(ip addr show ens33 | awk '/inet / {print $2}' | cut -d/ -f1)
-
-    sudo kubeadm init \
-      --control-plane-endpoint="${CONTROL_PLANE_ENDPOINT}:6443" \
-      --apiserver-advertise-address="$MASTER_IP" \
-      --apiserver-cert-extra-sans="$CONTROL_PLANE_ENDPOINT" \
-      --pod-network-cidr="$POD_CIDR" \
-      --node-name "$NODENAME" \
-      --upload-certs \
-      --ignore-preflight-errors Swap
-
+# Récupération de l'adresse IP
+if [[ "$PUBLIC_IP_ACCESS" == "true" ]]; then
+    MASTER_IP=$(curl -s ifconfig.me)
 else
-    MASTER_PUBLIC_IP=$(curl -s ifconfig.me)
-    sudo kubeadm init \
-      --control-plane-endpoint="$MASTER_PUBLIC_IP:6443" \
-      --apiserver-cert-extra-sans="$MASTER_PUBLIC_IP" \
-      --pod-network-cidr="$POD_CIDR" \
-      --node-name "$NODENAME" \
-      --upload-certs \
-      --ignore-preflight-errors Swap
+    MASTER_IP=$(ip -o -4 addr list | grep -v '127.0.0.1' | awk '{print $4}' | cut -d/ -f1 | head -n1)
 fi
 
-# Configure kubeconfig
-mkdir -p "$HOME"/.kube
-sudo cp -i /etc/kubernetes/admin.conf "$HOME"/.kube/config
-sudo chown "$(id -u)":"$(id -g)" "$HOME"/.kube/config
+# Pull des images nécessaires
+sudo kubeadm config images pull
 
-# Install Calico Network Plugin
+# Initialisation du master
+sudo kubeadm init \
+    --control-plane-endpoint="$CONTROL_PLANE_ENDPOINT" \
+    --apiserver-advertise-address="$MASTER_IP" \
+    --apiserver-cert-extra-sans="$MASTER_IP" \
+    --upload-certs \
+    --pod-network-cidr="$POD_CIDR" \
+    --node-name "$NODENAME" \
+    --ignore-preflight-errors Swap
+
+# Configuration de kubectl
+mkdir -p "$HOME/.kube"
+sudo cp -i /etc/kubernetes/admin.conf "$HOME/.kube/config"
+sudo chown "$(id -u)":"$(id -g)" "$HOME/.kube/config"
+
+# Installer Calico
 kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
 
-# Print join command for Master 2
+# Afficher les commandes kubeadm join (pour master2)
+echo "======= Commande kubeadm join pour les autres masters ======="
+kubeadm token create --print-join-command --ttl 1h
 CERT_KEY=$(kubeadm init phase upload-certs --upload-certs | tail -1)
-JOIN_CMD=$(kubeadm token create --print-join-command)
-
-echo
-echo "👉 Commande pour joindre le second master (control plane) :"
-echo
-echo "$JOIN_CMD --control-plane --certificate-key $CERT_KEY"
-echo
+echo "→ Certificate key à utiliser : $CERT_KEY"
